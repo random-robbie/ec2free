@@ -127,12 +127,12 @@ def select_ssh_key():
             print("Please enter a valid number")
 
 def get_ubuntu_ami(ec2_client, region):
-    """Get the latest Ubuntu 24.04 LTS AMI ID"""
+    """Get the latest Ubuntu 22.04 LTS AMI ID"""
     try:
-        # Ubuntu 24.04 LTS AMI filter
+        # Ubuntu 22.04 LTS AMI filter
         response = ec2_client.describe_images(
             Filters=[
-                {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*']},
+                {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*']},
                 {'Name': 'owner-id', 'Values': ['099720109477']},  # Canonical
                 {'Name': 'state', 'Values': ['available']},
                 {'Name': 'architecture', 'Values': ['x86_64']},
@@ -143,7 +143,7 @@ def get_ubuntu_ami(ec2_client, region):
         )
         
         if not response['Images']:
-            print(f"⚠️  No Ubuntu 24.04 AMI found in {region}")
+            print(f"⚠️  No Ubuntu AMI found in {region}")
             return None
         
         # Sort by creation date and get the latest
@@ -740,7 +740,7 @@ cat > /var/www/html/index.html << 'EOF'
         </div>
         
         <p><strong>Server Info:</strong><br>
-        Ubuntu 24.04.2 LTS<br>
+        Ubuntu 22.04 LTS<br>
         Instance Type: t2.micro (Free Tier)<br>
         Time: $(date)
         </p>
@@ -960,11 +960,32 @@ def main():
         # Create EC2 client for selected region
         ec2_client = session.client('ec2', region_name=region)
         
-        # Get Ubuntu AMI
+        # Get Ubuntu AMI with improved error handling
+        print(f"\n🔍 Looking for Ubuntu AMI in {region}...")
         ami_id = get_ubuntu_ami(ec2_client, region)
+        
         if not ami_id:
-            print("❌ Could not find Ubuntu AMI")
-            sys.exit(1)
+            print("\n❌ Could not find Ubuntu AMI automatically.")
+            print("Let's try to debug this...")
+            
+            # Offer debug option
+            debug = input("Would you like to see available AMIs for debugging? (y/N): ").strip().lower()
+            if debug == 'y':
+                ami_id = list_available_amis(ec2_client, region)
+            
+            if not ami_id:
+                print("\n🔧 Manual AMI Selection:")
+                print("You can find AMI IDs at: https://cloud-images.ubuntu.com/locator/ec2/")
+                manual_ami = input("Enter AMI ID manually (or press Enter to exit): ").strip()
+                
+                if manual_ami:
+                    ami_id = manual_ami
+                    print(f"Using manually specified AMI: {ami_id}")
+                else:
+                    print("❌ No AMI specified. Exiting.")
+                    sys.exit(1)
+        
+        print(f"✅ Using AMI: {ami_id}")
         
         # Create/import key pair
         key_name = create_key_pair(ec2_client, ssh_key['name'], public_key_content)
@@ -992,7 +1013,34 @@ def main():
         sys.exit(1)
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
+        print("\n🔧 Troubleshooting tips:")
+        print("1. Check your AWS credentials are configured correctly")
+        print("2. Ensure you have EC2 permissions in the selected region")
+        print("3. Try a different region (some regions may have limited AMI availability)")
+        print("4. Check if your account has any restrictions")
         sys.exit(1)
+        
+def test_ami_availability():
+    """Quick test function to check AMI availability across regions"""
+    print("🧪 Testing AMI availability across regions...")
+    
+    session = boto3.Session(profile_name=AWS_PROFILE)
+    
+    # Test common regions
+    test_regions = ['us-east-1', 'us-west-2', 'eu-west-1', 'us-east-2']
+    
+    for region in test_regions:
+        try:
+            ec2_client = session.client('ec2', region_name=region)
+            ami_id = get_ubuntu_ami(ec2_client, region)
+            if ami_id:
+                print(f"✅ {region}: {ami_id}")
+            else:
+                print(f"❌ {region}: No AMI found")
+        except Exception as e:
+            print(f"❌ {region}: Error - {str(e)}")
 
 if __name__ == "__main__":
+    # Uncomment the line below to test AMI availability first
+    #test_ami_availability()
     main()

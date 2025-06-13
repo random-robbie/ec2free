@@ -673,7 +673,7 @@ wait_for_system 10
 
 echo "📥 Installing Go (lightweight download)..."
 cd /tmp
-wget -q --timeout=30 https://go.dev/dl/go1.21.5.linux-amd64.tar.gz -O go.tar.gz
+wget -q --timeout=30 https://go.dev/dl/go1.24.4.linux-amd64.tar.gz -O go.tar.gz
 if [ -f go.tar.gz ]; then
     tar -C /usr/local -xzf go.tar.gz
     rm go.tar.gz

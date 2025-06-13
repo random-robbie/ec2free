@@ -819,7 +819,11 @@ if command -v /usr/local/go/bin/go >/dev/null 2>&1; then
     
     # Install one tool at a time
     echo "Installing nuclei..."
-    timeout 300 /usr/local/go/bin/go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest 2>/dev/null
+    timeout 300 wget https://github.com/projectdiscovery/nuclei/releases/download/v3.4.4/nuclei_3.4.4_linux_amd64.zip -O /home/ubuntu/go/bin/nuclei.zip
+    unzip /home/ubuntu/go/bin/nuclei.zip
+    rm /home/ubuntu/go/bin/*.md
+    chmod 777 /home/ubuntu/go/bin/nuclei
+    chown -R ubuntu:ubuntu /home/ubuntu/
     sleep 20
     
     echo "Installing subfinder..."

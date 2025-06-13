@@ -11,7 +11,7 @@ Automatically create and configure a free-tier AWS EC2 instance with pre-install
 - **Cost Management**: Prevents accidental multiple instances running
 
 ### **Pre-Configured Pentesting Environment**
-- **Ubuntu 22.04 LTS** on t2.micro (free tier eligible)
+- **Ubuntu 24.04.2 LTS** on t2.micro (free tier eligible)
 - **20GB EBS storage** (within 30GB free tier limit)
 - **Open security groups** for SSH (22), HTTP (80), and HTTPS (443)
 - **5-8 minute automated setup** via UserData script
@@ -21,7 +21,7 @@ Automatically create and configure a free-tier AWS EC2 instance with pre-install
 #### **Core Tools**
 - **Docker** + Docker Compose for containerized testing
 - **Python 3** + pip for scripting
-- **Go 1.21.5** for building security tools
+- **Go 1.24.4** for building security tools
 - **Git, vim, htop** for system management
 
 #### **Network & Web Testing**

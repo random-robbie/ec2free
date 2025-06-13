@@ -127,12 +127,12 @@ def select_ssh_key():
             print("Please enter a valid number")
 
 def get_ubuntu_ami(ec2_client, region):
-    """Get the latest Ubuntu 22.04 LTS AMI ID"""
+    """Get the latest Ubuntu 24.04 LTS AMI ID"""
     try:
-        # Ubuntu 22.04 LTS AMI filter
+        # Ubuntu 24.04 LTS AMI filter
         response = ec2_client.describe_images(
             Filters=[
-                {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*']},
+                {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*']},
                 {'Name': 'owner-id', 'Values': ['099720109477']},  # Canonical
                 {'Name': 'state', 'Values': ['available']},
                 {'Name': 'architecture', 'Values': ['x86_64']},
@@ -143,7 +143,7 @@ def get_ubuntu_ami(ec2_client, region):
         )
         
         if not response['Images']:
-            print(f"⚠️  No Ubuntu AMI found in {region}")
+            print(f"⚠️  No Ubuntu 24.04 AMI found in {region}")
             return None
         
         # Sort by creation date and get the latest
@@ -574,7 +574,7 @@ apt-get install -y nmap masscan gobuster nikto sqlmap john hashcat hydra
 
 # Install Go (for various security tools)
 echo "Installing Go..."
-wget -O /tmp/go.tar.gz https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
+wget -O /tmp/go.tar.gz https://go.dev/dl/go1.24.4.linux-amd64.tar.gz
 tar -C /usr/local -xzf /tmp/go.tar.gz
 
 # Configure Go environment for root (for installation)
@@ -740,7 +740,7 @@ cat > /var/www/html/index.html << 'EOF'
         </div>
         
         <p><strong>Server Info:</strong><br>
-        Ubuntu 22.04 LTS<br>
+        Ubuntu 24.04.2 LTS<br>
         Instance Type: t2.micro (Free Tier)<br>
         Time: $(date)
         </p>

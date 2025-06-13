@@ -622,7 +622,33 @@ echo "UserData script starting at $(date)"
 # Wait for cloud-init to finish initial setup
 wait_for_system 30
 
-log_phase "PHASE 1: SYSTEM UPDATE"
+log_phase "PHASE 1: ENVIRONMENT SETUP"
+echo "🔧 Setting up proper PATH environment..."
+
+# Fix PATH for all users and contexts
+cat > /etc/environment << 'ENV_EOF'
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/local/go/bin"
+GOPATH="/home/ubuntu/go"
+GOROOT="/usr/local/go"
+ENV_EOF
+
+# Update system-wide PATH for all shells
+cat > /etc/profile.d/pentest-paths.sh << 'PROFILE_EOF'
+#!/bin/bash
+# Pentest lab PATH configuration
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/local/go/bin:$HOME/go/bin"
+export GOPATH="$HOME/go"
+export GOROOT="/usr/local/go"
+PROFILE_EOF
+
+chmod +x /etc/profile.d/pentest-paths.sh
+
+# Source the new PATH for current session
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/local/go/bin"
+
+echo "✅ PATH environment configured"
+
+log_phase "PHASE 2: SYSTEM UPDATE"
 echo "🔄 Updating system packages (minimal approach)..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
@@ -631,7 +657,7 @@ apt-get install -y --only-upgrade $(apt list --upgradable 2>/dev/null | grep -v 
 
 wait_for_system 15
 
-log_phase "PHASE 2: BASIC TOOLS"
+log_phase "PHASE 3: BASIC TOOLS"
 echo "🛠️ Installing essential tools..."
 apt-get install -y curl wget git vim htop unzip tree
 wait_for_system 10
@@ -640,7 +666,7 @@ echo "📦 Installing network tools..."
 apt-get install -y netcat-openbsd nmap
 wait_for_system 10
 
-log_phase "PHASE 3: PYTHON AND GO"
+log_phase "PHASE 4: PYTHON AND GO"
 echo "🐍 Installing Python environment..."
 apt-get install -y python3 python3-pip python3-venv
 wait_for_system 10
@@ -656,15 +682,27 @@ else
     echo "⚠️ Go download failed, will retry later"
 fi
 
-# Configure Go paths
-echo 'export PATH=\$PATH:/usr/local/go/bin:/home/ubuntu/go/bin' >> /home/ubuntu/.bashrc
-echo 'export GOPATH=/home/ubuntu/go' >> /home/ubuntu/.bashrc
+# Configure Go paths for ubuntu user
+echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> /home/ubuntu/.bashrc
+echo 'export GOPATH=$HOME/go' >> /home/ubuntu/.bashrc
+echo 'export GOROOT=/usr/local/go' >> /home/ubuntu/.bashrc
+
+# Also update for root user
+echo 'export PATH=$PATH:/usr/local/go/bin:/home/ubuntu/go/bin' >> /root/.bashrc
+echo 'export GOPATH=/home/ubuntu/go' >> /root/.bashrc
+echo 'export GOROOT=/usr/local/go' >> /root/.bashrc
+
+# Create Go directories
 mkdir -p /home/ubuntu/go/{bin,src,pkg}
 chown -R ubuntu:ubuntu /home/ubuntu/go
 
+# Update current session PATH
+export PATH="$PATH:/usr/local/go/bin"
+export GOPATH="/home/ubuntu/go"
+
 wait_for_system 15
 
-log_phase "PHASE 4: DOCKER (SIMPLIFIED)"
+log_phase "PHASE 5: DOCKER (SIMPLIFIED)"
 echo "🐳 Installing Docker..."
 # Simplified Docker installation
 apt-get install -y ca-certificates gnupg lsb-release
@@ -680,7 +718,7 @@ usermod -aG docker ubuntu
 
 wait_for_system 20
 
-log_phase "PHASE 5: BASIC PENTEST TOOLS"
+log_phase "PHASE 6: BASIC PENTEST TOOLS"
 echo "🔍 Installing reconnaissance tools..."
 apt-get install -y masscan gobuster
 wait_for_system 10
@@ -689,7 +727,7 @@ echo "🌐 Installing web tools..."
 apt-get install -y nikto
 wait_for_system 10
 
-log_phase "PHASE 6: DIRECTORIES AND BASIC SETUP"
+log_phase "PHASE 7: DIRECTORIES AND BASIC SETUP"
 echo "📁 Creating workspace directories..."
 mkdir -p /home/ubuntu/{tools,wordlists,scripts}
 chown -R ubuntu:ubuntu /home/ubuntu/{tools,wordlists,scripts}
@@ -731,6 +769,11 @@ cat > /home/ubuntu/install_advanced_tools.sh << 'BACKGROUND_SCRIPT'
 exec >> /var/log/background-install.log 2>&1
 echo "🚀 Starting background installation at $(date)"
 
+# Set proper PATH for background script
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/local/go/bin"
+export GOPATH="/home/ubuntu/go"
+export GOROOT="/usr/local/go"
+
 sleep 60  # Wait a bit more for system to settle
 
 # Function to install with retries
@@ -768,7 +811,7 @@ sleep 15
 # Install Go tools if Go is available
 if command -v /usr/local/go/bin/go >/dev/null 2>&1; then
     echo "🔧 Installing Go-based tools..."
-    export PATH=\$PATH:/usr/local/go/bin
+    export PATH=$PATH:/usr/local/go/bin
     export GOPATH=/home/ubuntu/go
     export HOME=/home/ubuntu
     
@@ -787,10 +830,11 @@ if command -v /usr/local/go/bin/go >/dev/null 2>&1; then
     timeout 300 /usr/local/go/bin/go install github.com/ffuf/ffuf@latest 2>/dev/null
     sleep 20
     
-    # Copy tools to system path
+    # Copy tools to system path and set proper ownership
     if [ -d "/home/ubuntu/go/bin" ] && [ "$(ls -A /home/ubuntu/go/bin)" ]; then
         cp /home/ubuntu/go/bin/* /usr/local/bin/ 2>/dev/null || true
         chown ubuntu:ubuntu /home/ubuntu/go/bin/*
+        chmod +x /usr/local/bin/nuclei /usr/local/bin/subfinder /usr/local/bin/ffuf 2>/dev/null || true
     fi
 fi
 
@@ -844,6 +888,7 @@ cat > /var/www/html/index.html << 'FINAL_EOF'
         
         <p><strong>SSH Access:</strong> Use your private key to connect<br>
         <strong>Check Status:</strong> Run ./check_install.sh after SSH</p>
+        <p><strong>PATH Fixed:</strong> All standard commands now available</p>
     </div>
 </body>
 </html>
@@ -855,16 +900,25 @@ BACKGROUND_SCRIPT
 chmod +x /home/ubuntu/install_advanced_tools.sh
 chown ubuntu:ubuntu /home/ubuntu/install_advanced_tools.sh
 
-# Create check script
+# Create check script with proper PATH testing
 cat > /home/ubuntu/check_install.sh << 'CHECK_SCRIPT'
 #!/bin/bash
 echo "🔧 Pentest Lab Installation Status"
 echo "================================="
 
+echo -e "\n🛠️ Environment Check:"
+echo "Current PATH: $PATH"
+echo "Go PATH: $GOPATH"
+echo "Go ROOT: $GOROOT"
+
 echo -e "\n📦 System Info:"
 echo "OS: $(lsb_release -d 2>/dev/null | cut -f2)"
 echo "Uptime: $(uptime -p)"
 echo "Memory: $(free -h | grep Mem | awk '{print $3 "/" $2}')"
+
+echo -e "\n🔍 Basic Commands Test:"
+ls --version >/dev/null 2>&1 && echo "✅ ls command working" || echo "❌ ls command not found"
+which ls >/dev/null 2>&1 && echo "✅ which command working" || echo "❌ which command not found"
 
 echo -e "\n🔨 Core Tools:"
 command -v docker >/dev/null && echo "✅ Docker" || echo "❌ Docker"
@@ -896,10 +950,43 @@ fi
 echo -e "\n📊 Logs:"
 echo "Main log: sudo tail -f /var/log/user-data.log"
 echo "Background log: sudo tail -f /var/log/background-install.log"
+
+echo -e "\n🔧 PATH Test:"
+echo "Testing basic commands after PATH fix..."
+ls /bin >/dev/null 2>&1 && echo "✅ Can list /bin" || echo "❌ Cannot list /bin"
+echo "Available in /usr/local/bin:" 
+ls /usr/local/bin/ 2>/dev/null || echo "Nothing yet"
 CHECK_SCRIPT
 
 chmod +x /home/ubuntu/check_install.sh
 chown ubuntu:ubuntu /home/ubuntu/check_install.sh
+
+# Update ubuntu user's bashrc with complete PATH
+cat >> /home/ubuntu/.bashrc << 'BASHRC_EOF'
+
+# Pentest Lab PATH configuration
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/local/go/bin:$HOME/go/bin"
+export GOPATH="$HOME/go"
+export GOROOT="/usr/local/go"
+
+# Useful aliases for pentesting
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias grep='grep --color=auto'
+alias ports='netstat -tuln'
+alias myip='curl -s ifconfig.me'
+
+# Tool shortcuts
+alias nse='nmap --script-help'
+alias wscan='whatweb'
+alias pscan='nmap -sS -O'
+
+echo "🎯 Welcome to Pentest Lab!"
+echo "Run './check_install.sh' to check installation status"
+BASHRC_EOF
 
 # Create MOTD
 cat > /etc/motd << 'MOTD'
@@ -912,6 +999,7 @@ Welcome! 🎯
   ./check_install.sh    # Check installation status
   docker --version      # Test Docker
   nmap scanme.nmap.org  # Test nmap
+  ls -la                # Test basic commands
 
 🛠️ Core Tools Ready:
   nmap, masscan, gobuster, nikto, docker, python3
@@ -923,9 +1011,13 @@ Welcome! 🎯
   ~/wordlists/    # Essential wordlists
   ~/tools/        # Your tools directory
 
+🔧 PATH Issues Fixed:
+  All standard commands now work properly
+  Go tools available in $HOME/go/bin
+
 MOTD
 
-log_phase "PHASE 7: BACKGROUND INSTALLATION STARTUP"
+log_phase "PHASE 8: BACKGROUND INSTALLATION STARTUP"
 echo "🚀 Starting background installation..."
 nohup /home/ubuntu/install_advanced_tools.sh &
 
@@ -934,6 +1026,7 @@ echo "✅ Initial setup completed at $(date)"
 echo "🔄 Advanced tools installing in background"
 echo "📡 Web server running on port 80"
 echo "🔍 SSH ready for connections"
+echo "🛠️ PATH environment properly configured"
 """
         )
         
@@ -977,6 +1070,7 @@ def display_connection_info(instance_info, ssh_key, region):
     print("📦 Installing tools: Docker, Go, Nuclei, wordlists, etc.")
     print("⌛ Please wait 5-8 minutes for complete installation")
     print("📋 You can monitor progress by checking the installation log")
+    print("🔧 PATH environment issues have been fixed!")
     
     print("\n📡 CONNECTION COMMANDS:")
     print("-" * 30)
@@ -995,6 +1089,9 @@ def display_connection_info(instance_info, ssh_key, region):
     print("sudo cloud-init status")
     print("# Quick tool check:")
     print("./check_install.sh")
+    print("# Test basic commands:")
+    print("ls -la")
+    print("which ls")
     
     print("\n🛠️  TOOLS BEING INSTALLED:")
     print("-" * 30)
@@ -1014,6 +1111,7 @@ def display_connection_info(instance_info, ssh_key, region):
     print("🗑️  Remember to terminate when done testing")
     print("📊 Free tier includes 750 hours per month of t2.micro usage")
     print("📏 20GB EBS storage is within the 30GB free tier limit")
+    print("🔧 PATH issues fixed - ls, which, and other commands now work")
     
     print("\n✅ READY TO USE WHEN:")
     print("-" * 30)
@@ -1021,9 +1119,13 @@ def display_connection_info(instance_info, ssh_key, region):
     print("- SSH login shows custom MOTD with tool list")
     print("- Command 'nuclei -version' works")
     print("- Docker runs: 'docker run hello-world'")
+    print("- Basic commands like 'ls -la' work without issues")
     
     print("\n🔧 QUICK START AFTER INSTALLATION:")
     print("-" * 30)
+    print("# Test basic environment")
+    print("ls -la")
+    print("echo $PATH")
     print("# Test Nuclei")
     print("nuclei -u https://example.com")
     print("# Run a quick nmap scan")

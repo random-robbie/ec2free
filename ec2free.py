@@ -143,8 +143,25 @@ def get_ubuntu_ami(ec2_client, region):
         )
         
         if not response['Images']:
-            print(f"⚠️  No Ubuntu AMI found in {region}")
-            return None
+            print(f"⚠️  No Ubuntu 22.04 AMI found in {region}")
+            # Fallback to try Ubuntu 20.04 LTS if 22.04 not available
+            response = ec2_client.describe_images(
+                Filters=[
+                    {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*']},
+                    {'Name': 'owner-id', 'Values': ['099720109477']},
+                    {'Name': 'state', 'Values': ['available']},
+                    {'Name': 'architecture', 'Values': ['x86_64']},
+                    {'Name': 'virtualization-type', 'Values': ['hvm']},
+                    {'Name': 'root-device-type', 'Values': ['ebs']}
+                ],
+                Owners=['099720109477']
+            )
+            
+            if not response['Images']:
+                print(f"⚠️  No Ubuntu AMI found in {region}")
+                return None
+            
+            print(f"ℹ️  Using Ubuntu 20.04 LTS as fallback")
         
         # Sort by creation date and get the latest
         latest_ami = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)[0]
@@ -154,6 +171,45 @@ def get_ubuntu_ami(ec2_client, region):
         
     except Exception as e:
         print(f"Error finding Ubuntu AMI: {str(e)}")
+        return None
+
+def list_available_amis(ec2_client, region):
+    """Debug function to list available AMIs"""
+    try:
+        print(f"\n🔍 Available Ubuntu AMIs in {region}:")
+        print("-" * 60)
+        
+        # Check for various Ubuntu versions
+        ubuntu_versions = [
+            ('22.04', 'ubuntu-jammy-22.04'),
+            ('20.04', 'ubuntu-focal-20.04'),
+            ('18.04', 'ubuntu-bionic-18.04')
+        ]
+        
+        for version, codename in ubuntu_versions:
+            response = ec2_client.describe_images(
+                Filters=[
+                    {'Name': 'name', 'Values': [f'ubuntu/images/hvm-ssd/{codename}-amd64-server-*']},
+                    {'Name': 'owner-id', 'Values': ['099720109477']},
+                    {'Name': 'state', 'Values': ['available']}
+                ],
+                Owners=['099720109477'],
+                MaxResults=5
+            )
+            
+            print(f"\nUbuntu {version}:")
+            if response['Images']:
+                for ami in sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)[:3]:
+                    print(f"  {ami['ImageId']} - {ami['Name']} ({ami['CreationDate'][:10]})")
+            else:
+                print(f"  No Ubuntu {version} AMIs found")
+        
+        # Ask user to select manually
+        manual_ami = input("\nEnter AMI ID to use (or press Enter to continue): ").strip()
+        return manual_ami if manual_ami else None
+        
+    except Exception as e:
+        print(f"Error listing AMIs: {str(e)}")
         return None
 
 def create_key_pair(ec2_client, key_name, public_key_content):
@@ -216,11 +272,17 @@ def create_security_group(ec2_client, region):
                     'FromPort': 443,
                     'ToPort': 443,
                     'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTPS access from anywhere'}]
+                },
+                {
+                    'IpProtocol': 'tcp',
+                    'FromPort': 8080,
+                    'ToPort': 8090,
+                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Additional web ports for testing'}]
                 }
             ]
         )
         
-        print("✅ Security group rules added (SSH, HTTP, HTTPS)")
+        print("✅ Security group rules added (SSH, HTTP, HTTPS, 8080-8090)")
         return sg_id
         
     except Exception as e:
@@ -532,290 +594,346 @@ def create_ec2_instance(ec2_client, ami_id, key_name, sg_id, region):
                 }
             ],
             UserData="""#!/bin/bash
-# Log everything for debugging
+# Phased installation script with breaks and resource management
 exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+function log_phase() {
+    echo "=================================="
+    echo "PHASE: $1"
+    echo "Time: $(date)"
+    echo "Memory: $(free -h | grep Mem)"
+    echo "Disk: $(df -h / | tail -1)"
+    echo "=================================="
+}
+
+function wait_for_system() {
+    echo "⏳ Waiting for system to stabilize..."
+    sleep $1
+    # Wait for any background apt processes to finish
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+        echo "Waiting for other package managers to finish..."
+        sleep 5
+    done
+}
+
+log_phase "SYSTEM INITIALIZATION"
 echo "UserData script starting at $(date)"
 
-# Update system
-echo "Updating system packages..."
+# Wait for cloud-init to finish initial setup
+wait_for_system 30
+
+log_phase "PHASE 1: SYSTEM UPDATE"
+echo "🔄 Updating system packages (minimal approach)..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+# Only install security updates initially
+apt-get install -y --only-upgrade $(apt list --upgradable 2>/dev/null | grep -v WARNING | cut -d/ -f1 | head -20)
 
-# Install useful tools
-echo "Installing basic tools..."
-apt-get install -y htop curl wget git vim nmap netcat-openbsd unzip tree
+wait_for_system 15
 
-# Install Docker
-echo "Installing Docker..."
-apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-apt-get install -y ca-certificates curl gnupg lsb-release
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-systemctl start docker
-systemctl enable docker
-usermod -aG docker ubuntu
+log_phase "PHASE 2: BASIC TOOLS"
+echo "🛠️ Installing essential tools..."
+apt-get install -y curl wget git vim htop unzip tree
+wait_for_system 10
 
-# Add ec2-user to docker group if exists
-if id "ec2-user" &>/dev/null; then
-    usermod -aG docker ec2-user
-    echo "Added ec2-user to docker group"
-fi
+echo "📦 Installing network tools..."
+apt-get install -y netcat-openbsd nmap
+wait_for_system 10
 
-# Install Python3 and pip
-echo "Installing Python tools..."
+log_phase "PHASE 3: PYTHON AND GO"
+echo "🐍 Installing Python environment..."
 apt-get install -y python3 python3-pip python3-venv
+wait_for_system 10
 
-# Install additional penetration testing tools
-echo "Installing additional pentest tools..."
-apt-get install -y nmap masscan gobuster nikto sqlmap john hashcat hydra
-
-# Install Go (for various security tools)
-echo "Installing Go..."
-wget -O /tmp/go.tar.gz https://go.dev/dl/go1.24.4.linux-amd64.tar.gz
-tar -C /usr/local -xzf /tmp/go.tar.gz
-
-# Configure Go environment for root (for installation)
-echo 'export PATH=$PATH:/usr/local/go/bin' >> /root/.bashrc
-echo 'export GOPATH=/root/go' >> /root/.bashrc
-
-# Configure Go environment for ubuntu user (for usage)
-echo 'export PATH=$PATH:/usr/local/go/bin' >> /home/ubuntu/.bashrc
-echo 'export GOPATH=/home/ubuntu/go' >> /home/ubuntu/.bashrc
-echo 'export PATH=$PATH:/home/ubuntu/go/bin' >> /home/ubuntu/.bashrc
-
-# Also configure for ec2-user (in case of Amazon Linux or other AMIs)
-if [ -d "/home/ec2-user" ]; then
-    echo 'export PATH=$PATH:/usr/local/go/bin' >> /home/ec2-user/.bashrc
-    echo 'export GOPATH=/home/ec2-user/go' >> /home/ec2-user/.bashrc
-    echo 'export PATH=$PATH:/home/ec2-user/go/bin' >> /home/ec2-user/.bashrc
-    mkdir -p /home/ec2-user/go/{bin,src,pkg}
-    chown -R ec2-user:ec2-user /home/ec2-user/go 2>/dev/null || echo "ec2-user not found, skipping"
+echo "📥 Installing Go (lightweight download)..."
+cd /tmp
+wget -q --timeout=30 https://go.dev/dl/go1.21.5.linux-amd64.tar.gz -O go.tar.gz
+if [ -f go.tar.gz ]; then
+    tar -C /usr/local -xzf go.tar.gz
+    rm go.tar.gz
+    echo "✅ Go installed successfully"
+else
+    echo "⚠️ Go download failed, will retry later"
 fi
 
-# Create Go workspace for both users
-mkdir -p /root/go/{bin,src,pkg}
+# Configure Go paths
+echo 'export PATH=\$PATH:/usr/local/go/bin:/home/ubuntu/go/bin' >> /home/ubuntu/.bashrc
+echo 'export GOPATH=/home/ubuntu/go' >> /home/ubuntu/.bashrc
 mkdir -p /home/ubuntu/go/{bin,src,pkg}
 chown -R ubuntu:ubuntu /home/ubuntu/go
 
-# Install Go-based security tools
-echo "Installing Go-based security tools..."
-export HOME=/root
-export GOCACHE=/root/.cache/go-build
-export XDG_CACHE_HOME=/root/.cache
-export PATH=$PATH:/usr/local/go/bin
-export GOPATH=/root/go
+wait_for_system 15
 
-# Create cache directories
-mkdir -p $GOCACHE
-mkdir -p $XDG_CACHE_HOME
-mkdir -p $GOPATH/{bin,src,pkg}
+log_phase "PHASE 4: DOCKER (SIMPLIFIED)"
+echo "🐳 Installing Docker..."
+# Simplified Docker installation
+apt-get install -y ca-certificates gnupg lsb-release
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-# Install Nuclei with proper environment
-echo "Installing Nuclei..."
-/usr/local/go/bin/go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io
+systemctl enable docker
+systemctl start docker
+usermod -aG docker ubuntu
 
-# Install other useful Go tools
-echo "Installing subfinder..."
-/usr/local/go/bin/go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+wait_for_system 20
 
-echo "Installing httprobe..."
-/usr/local/go/bin/go install -v github.com/tomnomnom/httprobe@latest
+log_phase "PHASE 5: BASIC PENTEST TOOLS"
+echo "🔍 Installing reconnaissance tools..."
+apt-get install -y masscan gobuster
+wait_for_system 10
 
-echo "Installing ffuf..."
-/usr/local/go/bin/go install -v github.com/ffuf/ffuf@latest
+echo "🌐 Installing web tools..."
+apt-get install -y nikto
+wait_for_system 10
 
-# Move Go tools to system PATH for all users
-echo "Moving Go tools to system PATH..."
-if [ -d "$GOPATH/bin" ]; then
-    cp $GOPATH/bin/* /usr/local/bin/ 2>/dev/null || echo "No binaries to copy from GOPATH/bin"
-fi
+log_phase "PHASE 6: DIRECTORIES AND BASIC SETUP"
+echo "📁 Creating workspace directories..."
+mkdir -p /home/ubuntu/{tools,wordlists,scripts}
+chown -R ubuntu:ubuntu /home/ubuntu/{tools,wordlists,scripts}
 
-# Also copy to ubuntu user's Go bin for their PATH
-if [ -d "$GOPATH/bin" ]; then
-    cp $GOPATH/bin/* /home/ubuntu/go/bin/ 2>/dev/null || echo "No binaries to copy to ubuntu go/bin"
-    chown -R ubuntu:ubuntu /home/ubuntu/go/bin/
-fi
-
-# Copy to ec2-user if exists
-if [ -d "/home/ec2-user/go/bin" ]; then
-    cp $GOPATH/bin/* /home/ec2-user/go/bin/ 2>/dev/null || echo "No binaries to copy to ec2-user go/bin"
-    chown -R ec2-user:ec2-user /home/ec2-user/go/bin/ 2>/dev/null || true
-fi
-
-# Verify installations
-echo "Verifying Go tool installations..."
-/usr/local/bin/nuclei -version 2>/dev/null && echo "✅ Nuclei installed" || echo "❌ Nuclei failed"
-/usr/local/bin/subfinder -version 2>/dev/null && echo "✅ Subfinder installed" || echo "❌ Subfinder failed"
-/usr/local/bin/httprobe -h 2>/dev/null && echo "✅ Httprobe installed" || echo "❌ Httprobe failed"
-/usr/local/bin/ffuf -V 2>/dev/null && echo "✅ Ffuf installed" || echo "❌ Ffuf failed"
-
-# Download Nuclei templates
-echo "Downloading Nuclei templates..."
-if [ -f "/usr/local/bin/nuclei" ]; then
-    sudo -u ubuntu /usr/local/bin/nuclei -update-templates
-    # Also update for ec2-user if exists
-    if id "ec2-user" &>/dev/null; then
-        sudo -u ec2-user /usr/local/bin/nuclei -update-templates
-    fi
-else
-    echo "❌ Nuclei not found, skipping template download"
-fi
-
-# Create useful directories
-mkdir -p /home/ubuntu/tools
-mkdir -p /home/ubuntu/wordlists
-chown -R ubuntu:ubuntu /home/ubuntu/tools
-chown -R ubuntu:ubuntu /home/ubuntu/wordlists
-
-# Create directories for ec2-user if exists
-if [ -d "/home/ec2-user" ]; then
-    mkdir -p /home/ec2-user/tools
-    mkdir -p /home/ec2-user/wordlists
-    chown -R ec2-user:ec2-user /home/ec2-user/tools 2>/dev/null || true
-    chown -R ec2-user:ec2-user /home/ec2-user/wordlists 2>/dev/null || true
-fi
-
-# Download essential wordlists (smaller set to avoid disk issues)
-echo "Downloading essential wordlists..."
-cd /home/ubuntu/wordlists
-
-# Create essential directory
-mkdir -p essential
-cd essential
-
-# Download key wordlists only (much smaller than full SecLists)
-echo "Downloading common web wordlists..."
-wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -O common.txt
-wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/directory-list-2.3-medium.txt -O directory-list-medium.txt
-wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10-million-password-list-top-1000.txt -O top-1000-passwords.txt
-wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/big.txt -O big.txt
-
-# Download some additional useful lists
-echo "Downloading additional wordlists..."
-wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Usernames/Names/names.txt -O usernames.txt
-wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt -O subdomains-5k.txt
-
-echo "✅ Essential wordlists downloaded"
-chown -R ubuntu:ubuntu /home/ubuntu/wordlists
-
-# Check disk space after download
-echo "Disk space check:"
-df -h / | tail -1
-
-# Create a simple web server service
-echo "Setting up web server..."
+# Create a simple status page
 mkdir -p /var/www/html
 cat > /var/www/html/index.html << 'EOF'
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Pentest Lab Server</title>
+    <title>Pentest Lab - Installing...</title>
+    <meta http-equiv="refresh" content="30">
     <style>
         body { font-family: Arial; margin: 40px; background: #f0f0f0; }
         .container { background: white; padding: 20px; border-radius: 8px; }
-        .status { color: green; font-weight: bold; }
-        .tools { background: #f9f9f9; padding: 15px; margin: 10px 0; border-radius: 4px; }
+        .installing { color: orange; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🔧 Pentest Lab Server Ready!</h1>
-        <p class="status">✅ SSH and web services are running</p>
-        
-        <div class="tools">
-            <h3>Installed Tools:</h3>
-            <ul>
-                <li>Docker + Docker Compose</li>
-                <li>Python3 + pip</li>
-                <li>nmap, masscan, gobuster</li>
-                <li>nikto, sqlmap, john, hashcat</li>
-                <li>hydra, aircrack-ng</li>
-                <li>SecLists wordlists</li>
-                <li>Nuclei vulnerability scanner + templates</li>
-                <li>subfinder, httprobe, ffuf (Go tools)</li>
-            </ul>
-        </div>
-        
-        <p><strong>Server Info:</strong><br>
-        Ubuntu 22.04 LTS<br>
-        Instance Type: t2.micro (Free Tier)<br>
-        Time: $(date)
-        </p>
+        <h1>🔧 Pentest Lab Server</h1>
+        <p class="installing">⏳ Installation in progress...</p>
+        <p>Basic tools installed. Advanced tools installing in background.</p>
+        <p>This page will update automatically.</p>
+        <p><strong>Time:</strong> $(date)</p>
     </div>
 </body>
 </html>
 EOF
 
-# Create systemd service for web server
-cat > /etc/systemd/system/pentest-web.service << 'EOF'
-[Unit]
-Description=Pentest Lab Web Server
-After=network.target
+# Start basic web server
+python3 -m http.server 80 --directory /var/www/html &
 
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/var/www/html
-ExecStart=/usr/bin/python3 -m http.server 80
-Restart=always
+wait_for_system 10
 
-[Install]
-WantedBy=multi-user.target
-EOF
+# Create background installation script for remaining tools
+cat > /home/ubuntu/install_advanced_tools.sh << 'BACKGROUND_SCRIPT'
+#!/bin/bash
+exec >> /var/log/background-install.log 2>&1
+echo "🚀 Starting background installation at $(date)"
 
-systemctl enable pentest-web.service
-systemctl start pentest-web.service
+sleep 60  # Wait a bit more for system to settle
 
-# Create a welcome script for SSH login
-cat > /etc/motd << 'EOF'
+# Function to install with retries
+install_with_retry() {
+    local tool=$1
+    local max_attempts=3
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        echo "Installing $tool (attempt $attempt/$max_attempts)..."
+        if apt-get install -y $tool; then
+            echo "✅ $tool installed successfully"
+            return 0
+        else
+            echo "⚠️ $tool installation failed, retrying..."
+            sleep 10
+        fi
+        ((attempt++))
+    done
+    echo "❌ Failed to install $tool after $max_attempts attempts"
+    return 1
+}
+
+# Install heavier tools one by one with breaks
+echo "📦 Installing password tools..."
+install_with_retry john
+sleep 15
+install_with_retry hydra
+sleep 15
+
+echo "🗄️ Installing database tools..."
+install_with_retry sqlmap
+sleep 15
+
+# Install Go tools if Go is available
+if command -v /usr/local/go/bin/go >/dev/null 2>&1; then
+    echo "🔧 Installing Go-based tools..."
+    export PATH=\$PATH:/usr/local/go/bin
+    export GOPATH=/home/ubuntu/go
+    export HOME=/home/ubuntu
+    
+    cd /home/ubuntu
+    
+    # Install one tool at a time
+    echo "Installing nuclei..."
+    timeout 300 /usr/local/go/bin/go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest 2>/dev/null
+    sleep 20
+    
+    echo "Installing subfinder..."
+    timeout 300 /usr/local/go/bin/go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest 2>/dev/null
+    sleep 20
+    
+    echo "Installing ffuf..."
+    timeout 300 /usr/local/go/bin/go install github.com/ffuf/ffuf@latest 2>/dev/null
+    sleep 20
+    
+    # Copy tools to system path
+    if [ -d "/home/ubuntu/go/bin" ] && [ "$(ls -A /home/ubuntu/go/bin)" ]; then
+        cp /home/ubuntu/go/bin/* /usr/local/bin/ 2>/dev/null || true
+        chown ubuntu:ubuntu /home/ubuntu/go/bin/*
+    fi
+fi
+
+# Download essential wordlists (small set)
+echo "📚 Downloading wordlists..."
+cd /home/ubuntu/wordlists
+mkdir -p essential
+cd essential
+
+wget -q --timeout=30 https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -O common.txt &
+wget -q --timeout=30 https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10-million-password-list-top-1000.txt -O top-1000-passwords.txt &
+wait
+
+chown -R ubuntu:ubuntu /home/ubuntu/wordlists
+
+# Update nuclei templates if available
+if command -v nuclei >/dev/null 2>&1; then
+    echo "📡 Updating nuclei templates..."
+    sudo -u ubuntu nuclei -update-templates -silent
+fi
+
+# Update the web page to show completion
+cat > /var/www/html/index.html << 'FINAL_EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pentest Lab Server Ready!</title>
+    <style>
+        body { font-family: Arial; margin: 40px; background: #f0f0f0; }
+        .container { background: white; padding: 20px; border-radius: 8px; }
+        .ready { color: green; font-weight: bold; }
+        .tools { background: #f9f9f9; padding: 15px; margin: 10px 0; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 Pentest Lab Server</h1>
+        <p class="ready">✅ Installation Complete!</p>
+        
+        <div class="tools">
+            <h3>Available Tools:</h3>
+            <ul>
+                <li>Basic: nmap, masscan, gobuster, nikto</li>
+                <li>Advanced: nuclei, subfinder, ffuf (if installed)</li>
+                <li>Password: john, hydra</li>
+                <li>Database: sqlmap</li>
+                <li>Container: Docker</li>
+                <li>Development: Python3, Go</li>
+            </ul>
+        </div>
+        
+        <p><strong>SSH Access:</strong> Use your private key to connect<br>
+        <strong>Check Status:</strong> Run ./check_install.sh after SSH</p>
+    </div>
+</body>
+</html>
+FINAL_EOF
+
+echo "🎉 Background installation completed at $(date)"
+BACKGROUND_SCRIPT
+
+chmod +x /home/ubuntu/install_advanced_tools.sh
+chown ubuntu:ubuntu /home/ubuntu/install_advanced_tools.sh
+
+# Create check script
+cat > /home/ubuntu/check_install.sh << 'CHECK_SCRIPT'
+#!/bin/bash
+echo "🔧 Pentest Lab Installation Status"
+echo "================================="
+
+echo -e "\n📦 System Info:"
+echo "OS: $(lsb_release -d 2>/dev/null | cut -f2)"
+echo "Uptime: $(uptime -p)"
+echo "Memory: $(free -h | grep Mem | awk '{print $3 "/" $2}')"
+
+echo -e "\n🔨 Core Tools:"
+command -v docker >/dev/null && echo "✅ Docker" || echo "❌ Docker"
+command -v python3 >/dev/null && echo "✅ Python3" || echo "❌ Python3"
+command -v /usr/local/go/bin/go >/dev/null && echo "✅ Go" || echo "❌ Go"
+
+echo -e "\n🛠️ Security Tools:"
+command -v nmap >/dev/null && echo "✅ Nmap" || echo "❌ Nmap"
+command -v masscan >/dev/null && echo "✅ Masscan" || echo "❌ Masscan"
+command -v gobuster >/dev/null && echo "✅ Gobuster" || echo "❌ Gobuster"
+command -v nikto >/dev/null && echo "✅ Nikto" || echo "❌ Nikto"
+command -v nuclei >/dev/null && echo "✅ Nuclei" || echo "⏳ Nuclei (installing)"
+command -v subfinder >/dev/null && echo "✅ Subfinder" || echo "⏳ Subfinder (installing)"
+command -v ffuf >/dev/null && echo "✅ Ffuf" || echo "⏳ Ffuf (installing)"
+command -v john >/dev/null && echo "✅ John" || echo "⏳ John (installing)"
+command -v hydra >/dev/null && echo "✅ Hydra" || echo "⏳ Hydra (installing)"
+command -v sqlmap >/dev/null && echo "✅ SQLMap" || echo "⏳ SQLMap (installing)"
+
+echo -e "\n📚 Resources:"
+[ -d ~/wordlists/essential ] && echo "✅ Wordlists" || echo "⏳ Wordlists (downloading)"
+
+echo -e "\n🔄 Installation Status:"
+if pgrep -f install_advanced_tools.sh >/dev/null; then
+    echo "⏳ Background installation running"
+else
+    echo "✅ Installation complete"
+fi
+
+echo -e "\n📊 Logs:"
+echo "Main log: sudo tail -f /var/log/user-data.log"
+echo "Background log: sudo tail -f /var/log/background-install.log"
+CHECK_SCRIPT
+
+chmod +x /home/ubuntu/check_install.sh
+chown ubuntu:ubuntu /home/ubuntu/check_install.sh
+
+# Create MOTD
+cat > /etc/motd << 'MOTD'
 
 🔧 PENTEST LAB SERVER
 ===================
-Welcome to your penetration testing environment!
+Welcome! 🎯
 
-📋 Quick Commands:
-  - docker --version        # Check Docker installation
-  - python3 --version       # Check Python
-  - go version              # Check Go installation
-  - nuclei -version          # Check Nuclei scanner
-  - ls ~/wordlists          # View wordlists
-  - ls ~/tools              # Your tools directory
-  - ls ~/go                 # Go workspace
+📋 Quick Start:
+  ./check_install.sh    # Check installation status
+  docker --version      # Test Docker
+  nmap scanme.nmap.org  # Test nmap
 
-🛠️  Installed Tools:
-  - nmap, masscan, gobuster, nikto
-  - sqlmap, john, hashcat, hydra
-  - Nuclei with templates (vulnerability scanner)
-  - subfinder, httprobe, ffuf
-  - Docker with compose plugin
-  - Go 1.21.5 programming language
-  - SecLists wordlists in ~/wordlists
+🛠️ Core Tools Ready:
+  nmap, masscan, gobuster, nikto, docker, python3
 
-🌐 Web Interface: http://[your-ip]/
+⏳ Advanced tools installing in background:
+  nuclei, subfinder, ffuf, john, hydra, sqlmap
 
-Happy hacking! 🔒
+📚 Resources:
+  ~/wordlists/    # Essential wordlists
+  ~/tools/        # Your tools directory
 
-EOF
+MOTD
 
-# Final setup
-echo "Running final setup tasks..."
-# Ensure docker works for ubuntu user
-systemctl restart docker
-sleep 5
+log_phase "PHASE 7: BACKGROUND INSTALLATION STARTUP"
+echo "🚀 Starting background installation..."
+nohup /home/ubuntu/install_advanced_tools.sh &
 
-# Test installations
-echo "Testing installations..."
-docker --version >> /var/log/user-data.log
-python3 --version >> /var/log/user-data.log
-/usr/local/go/bin/go version >> /var/log/user-data.log
-/usr/local/bin/nuclei -version >> /var/log/user-data.log 2>&1 || echo "Nuclei not found" >> /var/log/user-data.log
-nmap --version | head -2 >> /var/log/user-data.log
-
-echo "UserData script completed at $(date)" >> /var/log/user-data.log
-echo "Setup complete! Check /var/log/user-data.log for details"
+log_phase "INITIAL SETUP COMPLETE"
+echo "✅ Initial setup completed at $(date)"
+echo "🔄 Advanced tools installing in background"
+echo "📡 Web server running on port 80"
+echo "🔍 SSH ready for connections"
 """
         )
         
@@ -899,7 +1017,7 @@ def display_connection_info(instance_info, ssh_key, region):
     
     print("\n✅ READY TO USE WHEN:")
     print("-" * 30)
-    print("- Web page shows 'Pentest Lab Server Ready!' at http://{}")
+    print(f"- Web page shows 'Pentest Lab Server Ready!' at http://{instance_info['public_ip']}")
     print("- SSH login shows custom MOTD with tool list")
     print("- Command 'nuclei -version' works")
     print("- Docker runs: 'docker run hello-world'")
@@ -917,7 +1035,6 @@ def display_connection_info(instance_info, ssh_key, region):
     
     print("=" * 60)
     
-    # Format the web URL
     return instance_info['public_ip']
 
 def main():
@@ -1027,7 +1144,7 @@ def test_ami_availability():
     session = boto3.Session(profile_name=AWS_PROFILE)
     
     # Test common regions
-    test_regions = ['us-east-1', 'us-west-2', 'eu-west-1', 'us-east-2']
+    test_regions = ['us-east-1', 'us-west-2', 'eu-west-1', 'ap-southeast-1']
     
     for region in test_regions:
         try:
@@ -1042,5 +1159,5 @@ def test_ami_availability():
 
 if __name__ == "__main__":
     # Uncomment the line below to test AMI availability first
-    #test_ami_availability()
+    # test_ami_availability()
     main()
